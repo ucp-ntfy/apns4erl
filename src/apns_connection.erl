@@ -82,30 +82,24 @@ init(Connection) ->
 %% @hidden
 -spec init(atom(), apns:connection()) -> {ok, state() | {stop, term()}}.
 init(Name, Connection) ->
-  try
-    {ok, QID} = apns_queue:start_link(),
-    Timeout = epoch() + Connection#apns_connection.expires_conn,
-    case open_out(Connection) of
-      {ok, OutSocket} -> case open_feedback(Connection) of
-          {ok, InSocket} ->
-            {ok, #state{ out_socket = OutSocket
-                       , in_socket  = InSocket
-                       , connection = Connection
-                       , queue      = QID
-                       , out_expires = Timeout
-                       , name = Name
-                       , error_logger_fun =
-                          Connection#apns_connection.error_logger_fun
-                       , info_logger_fun  =
-                          Connection#apns_connection.info_logger_fun
-                       }};
-          {error, Reason} -> {stop, Reason}
-        end;
-      {error, Reason} -> {stop, Reason}
-    end
-  catch
-    _:{error, Reason2} -> {stop, Reason2}
-  end.
+  {ok, QID} = apns_queue:start_link(),
+
+  self() ! wait_init,
+  self() ! reconnect, % connect feedback async
+
+  Timeout = epoch() + Connection#apns_connection.expires_conn,
+
+  {ok, #state{ out_socket = undefined
+             , in_socket  = undefined
+             , connection = Connection
+             , queue      = QID
+             , out_expires = Timeout
+             , name = Name
+             , error_logger_fun =
+                Connection#apns_connection.error_logger_fun
+             , info_logger_fun  =
+                Connection#apns_connection.info_logger_fun
+             }}.
 
 %% @hidden
 ssl_opts(Connection) ->
@@ -249,6 +243,9 @@ handle_info( {ssl, SslSocket, Data}
     NextBuffer -> %% We need to wait for the rest of the message
       {noreply, State#state{out_buffer = NextBuffer}}
   end;
+handle_info( wait_init, State ) ->
+  timer:sleep(3000),
+  {noreply, State};
 handle_info( {ssl, SslSocket, Data}
            , State = #state{ in_socket  = SslSocket
                            , connection =
@@ -430,7 +427,7 @@ parse_status(_) -> unknown.
 %
 build_frame(MsgId, Expiry, BinToken, Payload, Priority) ->
   PayloadLength = erlang:size(Payload),
-  <<1:8, 32:16/big, BinToken/binary, 
+  <<1:8, 32:16/big, BinToken/binary,
     2:8, PayloadLength:16/big, Payload/binary,
     3:8, 4:16/big, MsgId/binary,
     4:8, 4:16/big, Expiry:4/big-unsigned-integer-unit:8,
